@@ -1,73 +1,58 @@
-def CJobs = 4
-def repo = "AlexanderLazarev/mntlab-dsl"
-def repoURL = "https://github.com/" + repo + ".git"
-def command = "git ls-remote -h $repoURL"
+node(env.SLAVE) {
 
-def proc = command.execute()
-proc.waitFor()
+	def gitURL = "https://github.com/AlexanderLazarev/mntlab-pipeline"
+	def gradle = "/usr/bin/gradle"
 
-if ( proc.exitValue() != 0 ) {
-    println "Error, ${proc.err.text}"
-    System.exit(-1)
-}
-
-def branches = proc.in.text.readLines().collect {
-    it.replaceAll(/[a-z0-9]*\trefs\/heads\//, '')
-}
-
-job('Job_main') {
-	scm {
-		github repo, '$BRANCH_NAME'
+	stage('Preparation') {
+		git([url: gitURL + '.git', branch: 'alazarev'])
 	}
-	parameters {
-		choiceParam('BRANCH_NAME', ['alazarev (default)', 'master'], '')
-		activeChoiceParam('BUILDS_TRIGGER') {
-			description('Available options')
-			filterable()
-            choiceType('CHECKBOX')
-            groovyScript {
-                script('["Job_child1", "Job_child2", "Job_child3", "Job_child4"]')
-            }
-		}
-    }
-	steps {
-        downstreamParameterized {
-            trigger('$BUILDS_TRIGGER') {
-                block {
-                    buildStepFailure('FAILURE')
-                    failure('FAILURE')
-                    unstable('UNSTABLE')
-                }
-               parameters {
-                    currentBuild()
-				}
-			}
-			shell(' echo "Publish artefact for childs jobs"')
-		}	
+	
+	stage('Build') {
+		echo 'BUILDING'
+		sh gradle + ' build'
 	}
-	publishers { 
-        archiveArtifacts {
-            pattern('script.sh')
-            onlyIfSuccessful()
+	
+	stage('Test') {
+		echo 'TESTING'
+		parallel (
+			'Unit Tests': {sh gradle + ' test'},
+			'Jacoco Test': {sh gradle + ' jacocoTestReport'},
+			'Cucumber Tests': {sh gradle + ' cucumber'}
+		)
+	}
+
+	stage('Trigger') {
+		echo 'TRIGGERING'
+		build job: "Job_child1", parameters: [string(name: 'BRANCH_NAME', value: 'master')]
+		step([
+		    $class: 'CopyArtifact', 
+		    filter: 'alazarev_dsl_script.tar.gz', 
+		    flatten: true, 
+		    projectName: 'Job_child1', 
+		    selector: [$class: 'StatusBuildSelector', stable: false]])
+	}
+	
+	stage('Packaging and Publishing') {
+		echo 'PACKAGING AND PUBLISHING'
+		sh 'cp ./build/libs/gradle-simple.jar ./'
+		sh 'tar -czf pipeline-alazarev-${BUILD_NUMBER}.tar.gz script.groovy Jenkinsfile gradle-simple.jar'
+		archiveArtifacts 'pipeline-alazarev-${BUILD_NUMBER}.tar.gz'
+	}
+
+	stage('Asking for manual approval') {
+		timeout(time:1, unit:'HOURS') {
+           input message:'Do you deployment this artefact?', ok: 'yes'
 		}
 	}
 	
-}
- 
-
-for (int i = 1; i <= CJobs; i++) {
-	job('Job_child'+i) {
-		steps {
-			copyArtifacts('Job_main') {
-				includePatterns('script.sh')
-				targetDirectory('./')
-				flatten()
-				optional()
-				buildSelector {
-					workspace()
-				}
-			}
-			shell('bash ./script.sh > output.txt && tar -czvf ${BRANCH_NAME}_dsl_script.tar.gz ./*')
-		}
+	stage('Deployment') {
+		echo 'DEPLOYMENT'
+		sh 'java -jar gradle-simple.jar'
 	}
+	
+	stage('Sending status') {
+		sh 'echo "SUCCESS"'
+	}
+
+
 }
